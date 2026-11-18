@@ -46,8 +46,17 @@ data class DownloadServiceState(
     val completedFile: File? = null,
     val isCompleted: Boolean = false,
     val isError: Boolean = false,
+    val canRetry: Boolean = false,
     val completedTimestamp: Long = 0L,
     val queuedCount: Int = 0
+)
+
+data class BatchDownloadItem(
+    val url: String,
+    val title: String,
+    val format: SelectedFormat,
+    val customFileName: String?,
+    val subfolder: String
 )
 
 private data class QueuedDownload(
@@ -86,12 +95,46 @@ class DownloadForegroundService : Service() {
                     isDownloading = false,
                     isCompleted = false,
                     isError = false,
+                    canRetry = false,
                     queuedCount = 0,
                     statusMessage = "Download cancelado."
                 )
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
+            }
+
+            ACTION_RETRY -> {
+                val retryItem = lastFailedItem
+                if (retryItem == null) {
+                    if (queueProcessorJob?.isActive != true) stopSelf()
+                    return START_NOT_STICKY
+                }
+                lastFailedItem = null
+                enqueueAndStart(listOf(retryItem), showQueuedToast = false)
+            }
+
+            ACTION_START_BATCH -> {
+                val batch = synchronized(batchLock) {
+                    val copy = stagedBatchItems.toList()
+                    stagedBatchItems.clear()
+                    copy
+                }
+                if (batch.isEmpty()) {
+                    if (queueProcessorJob?.isActive != true) stopSelf()
+                    return START_NOT_STICKY
+                }
+                val converted = batch.map { item ->
+                    QueuedDownload(
+                        url = item.url,
+                        title = item.title,
+                        format = item.format,
+                        trim = null,
+                        customFileName = item.customFileName,
+                        subfolder = item.subfolder
+                    )
+                }
+                enqueueAndStart(converted, showQueuedToast = true)
             }
 
             ACTION_START -> {
@@ -129,58 +172,63 @@ class DownloadForegroundService : Service() {
                     customFileName = customFileName,
                     subfolder = subfolder
                 )
-
-                val alreadyRunning: Boolean
-                val queueSizeAfterAdd: Int
-                synchronized(queueLock) {
-                    alreadyRunning = queueProcessorJob?.isActive == true
-                    pendingQueue.addLast(queuedItem)
-                    queueSizeAfterAdd = pendingQueue.size
-                }
-
-                // Sempre chamar startForeground imediatamente para cumprir o contrato do Android
-                val currentState = _downloadState.value
-                val notifTitle = if (alreadyRunning && currentState.title.isNotBlank()) {
-                    currentState.title
-                } else {
-                    title
-                }
-                val notifProgress = if (alreadyRunning) currentState.progress.toInt() else 0
-                val notifStatus = if (alreadyRunning) {
-                    currentState.statusMessage.ifBlank { "Baixando..." }
-                } else {
-                    "Preparando download..."
-                }
-                val foregroundNotification = buildProgressNotification(
-                    title = notifTitle,
-                    progress = notifProgress,
-                    status = notifStatus,
-                    queuedCount = if (alreadyRunning) queueSizeAfterAdd else 0
-                )
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        PROGRESS_NOTIFICATION_ID,
-                        foregroundNotification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                    )
-                } else {
-                    startForeground(PROGRESS_NOTIFICATION_ID, foregroundNotification)
-                }
-
-                if (alreadyRunning) {
-                    _downloadState.value = _downloadState.value.copy(queuedCount = queueSizeAfterAdd)
-                    Toast.makeText(
-                        this,
-                        "📥 Adicionado à fila ($queueSizeAfterAdd na espera)",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    return START_NOT_STICKY
-                }
-
-                startQueueProcessor()
+                enqueueAndStart(listOf(queuedItem), showQueuedToast = true)
             }
         }
         return START_NOT_STICKY
+    }
+
+    private fun enqueueAndStart(items: List<QueuedDownload>, showQueuedToast: Boolean) {
+        val alreadyRunning: Boolean
+        val queueSizeAfterAdd: Int
+        synchronized(queueLock) {
+            alreadyRunning = queueProcessorJob?.isActive == true
+            items.forEach { pendingQueue.addLast(it) }
+            queueSizeAfterAdd = pendingQueue.size
+        }
+
+        val currentState = _downloadState.value
+        val firstTitle = items.firstOrNull()?.title ?: "Mídia Klipr"
+        val notifTitle = if (alreadyRunning && currentState.title.isNotBlank()) {
+            currentState.title
+        } else {
+            firstTitle
+        }
+        val notifProgress = if (alreadyRunning) currentState.progress.toInt() else 0
+        val notifStatus = if (alreadyRunning) {
+            currentState.statusMessage.ifBlank { "Baixando..." }
+        } else {
+            "Preparando download..."
+        }
+        val foregroundNotification = buildProgressNotification(
+            title = notifTitle,
+            progress = notifProgress,
+            status = notifStatus,
+            queuedCount = if (alreadyRunning) queueSizeAfterAdd else (queueSizeAfterAdd - 1).coerceAtLeast(0)
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                PROGRESS_NOTIFICATION_ID,
+                foregroundNotification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(PROGRESS_NOTIFICATION_ID, foregroundNotification)
+        }
+
+        if (alreadyRunning) {
+            _downloadState.value = _downloadState.value.copy(queuedCount = queueSizeAfterAdd)
+            if (showQueuedToast) {
+                Toast.makeText(
+                    this,
+                    "📥 Adicionado à fila ($queueSizeAfterAdd na espera)",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            return
+        }
+
+        startQueueProcessor()
     }
 
     private fun startQueueProcessor() {
@@ -199,6 +247,7 @@ class DownloadForegroundService : Service() {
 
                 activeProcessId = "klipr_${System.currentTimeMillis()}"
                 val processId = activeProcessId
+                lastFailedItem = null
 
                 _downloadState.value = DownloadServiceState(
                     isDownloading = true,
@@ -212,6 +261,7 @@ class DownloadForegroundService : Service() {
                     completedFile = null,
                     isCompleted = false,
                     isError = false,
+                    canRetry = false,
                     queuedCount = remainingCount
                 )
 
@@ -268,6 +318,7 @@ class DownloadForegroundService : Service() {
                         completedFile = realFile,
                         isCompleted = true,
                         isError = false,
+                        canRetry = false,
                         completedTimestamp = System.currentTimeMillis(),
                         queuedCount = currentQueuedAfter
                     )
@@ -282,10 +333,14 @@ class DownloadForegroundService : Service() {
                     )
                 }.onFailure { err ->
                     val wasCanceled = err is YoutubeDL.CanceledException
+                    if (!wasCanceled) {
+                        lastFailedItem = item
+                    }
                     _downloadState.value = _downloadState.value.copy(
                         isDownloading = currentQueuedAfter > 0,
                         isCompleted = false,
                         isError = !wasCanceled,
+                        canRetry = !wasCanceled,
                         statusMessage = if (wasCanceled) {
                             "Download cancelado."
                         } else {
@@ -296,7 +351,7 @@ class DownloadForegroundService : Service() {
                     if (!wasCanceled) {
                         notificationManager.notify(
                             nextCompletionId++,
-                            buildErrorNotification(item.title, err.message ?: "Falha inesperada")
+                            buildErrorNotification(item.title, err.message ?: "Falha de rede")
                         )
                     }
                 }
@@ -452,12 +507,33 @@ class DownloadForegroundService : Service() {
             openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+
+        val retryIntent = Intent(this, DownloadForegroundService::class.java).apply {
+            action = ACTION_RETRY
+        }
+        val retryPending = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(
+                this,
+                31,
+                retryIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        } else {
+            PendingIntent.getService(
+                this,
+                31,
+                retryIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_DONE)
             .setSmallIcon(R.drawable.ic_stop)
             .setContentTitle("Falha ao baixar: $title")
             .setContentText(message)
             .setAutoCancel(true)
             .setContentIntent(pending)
+            .addAction(R.drawable.ic_download, "🔄 Retomar", retryPending)
             .build()
     }
 
@@ -468,7 +544,9 @@ class DownloadForegroundService : Service() {
         private const val COMPLETION_NOTIFICATION_ID_BASE = 1002
 
         const val ACTION_START = "com.klipr.mobile.action.START_DOWNLOAD"
+        const val ACTION_START_BATCH = "com.klipr.mobile.action.START_BATCH_DOWNLOAD"
         const val ACTION_CANCEL = "com.klipr.mobile.action.CANCEL_DOWNLOAD"
+        const val ACTION_RETRY = "com.klipr.mobile.action.RETRY_DOWNLOAD"
 
         private const val EXTRA_URL = "extra_url"
         private const val EXTRA_TITLE = "extra_title"
@@ -482,6 +560,12 @@ class DownloadForegroundService : Service() {
         private const val EXTRA_TRIM_ACCURATE = "extra_trim_accurate"
         private const val EXTRA_FILE_NAME = "extra_file_name"
         private const val EXTRA_SUBFOLDER = "extra_subfolder"
+
+        private val batchLock = Any()
+        private val stagedBatchItems = mutableListOf<BatchDownloadItem>()
+
+        @Volatile
+        private var lastFailedItem: QueuedDownload? = null
 
         private val _downloadState = MutableStateFlow(DownloadServiceState())
         val downloadState: StateFlow<DownloadServiceState> = _downloadState.asStateFlow()
@@ -515,6 +599,25 @@ class DownloadForegroundService : Service() {
                 putExtra(EXTRA_TRIM_ACCURATE, trim?.accurateCut ?: false)
                 putExtra(EXTRA_FILE_NAME, customFileName)
                 putExtra(EXTRA_SUBFOLDER, targetSubfolder)
+            }
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        fun enqueueBatch(context: Context, items: List<BatchDownloadItem>) {
+            if (items.isEmpty()) return
+            synchronized(batchLock) {
+                stagedBatchItems.addAll(items)
+            }
+            val intent = Intent(context, DownloadForegroundService::class.java).apply {
+                action = ACTION_START_BATCH
+            }
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        fun retryLastFailed(context: Context) {
+            if (lastFailedItem == null) return
+            val intent = Intent(context, DownloadForegroundService::class.java).apply {
+                action = ACTION_RETRY
             }
             ContextCompat.startForegroundService(context, intent)
         }

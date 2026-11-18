@@ -38,7 +38,9 @@ fun SettingsAndThemesSheet(
     onToggleNightlyYtDlp: (Boolean) -> Unit,
     onUpdateYtDlpNow: () -> Unit,
     onCheckAppUpdateNow: () -> Unit,
-    onInstallAppUpdate: () -> Unit
+    onInstallAppUpdate: () -> Unit,
+    onOpenCookieLogin: () -> Unit,
+    onClearCookies: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -185,6 +187,69 @@ fun SettingsAndThemesSheet(
                 checked = uiState.useNightlyYtDlp,
                 onCheckedChange = onToggleNightlyYtDlp
             )
+
+            // Cookies & Contas (Vídeos Privados / +18)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = KliprSurface,
+                border = BorderStroke(
+                    1.dp,
+                    if (uiState.hasSavedCookies) KliprSuccess.copy(alpha = 0.5f) else KliprBorder
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "🔐 Cookies & Contas (Vídeos Privados / +18)",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = KliprTextPrimary
+                    )
+                    Text(
+                        text = if (uiState.hasSavedCookies) {
+                            "Sessão autenticada salva — liberado para Instagram, X e YouTube +18"
+                        } else {
+                            "Nenhuma sessão salva — faça login para links restritos"
+                        },
+                        fontSize = 11.sp,
+                        color = if (uiState.hasSavedCookies) KliprSuccess else KliprTextSecondary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onOpenCookieLogin,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 44.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = KliprPrimary)
+                        ) {
+                            Text(
+                                text = if (uiState.hasSavedCookies) "Atualizar Login" else "Fazer Login / Cookies",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                        if (uiState.hasSavedCookies) {
+                            OutlinedButton(
+                                onClick = onClearCookies,
+                                modifier = Modifier.heightIn(min = 44.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, KliprError),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = KliprError)
+                            ) {
+                                Text("Limpar", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
 
             // Atualização do Motor yt-dlp
             Surface(

@@ -12,6 +12,7 @@ import com.yausername.youtubedl_android.YoutubeDLRequest
 import com.yausername.youtubedl_android.mapper.VideoFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -35,7 +36,23 @@ data class VideoInfo(
     val availableHeights: List<Int> = listOf(1080, 720, 480, 360),
     val formatSizesMb: Map<Int, Double> = emptyMap(),
     val audioSizeMb: Double? = null,
-    val chapters: List<VideoChapter> = emptyList()
+    val chapters: List<VideoChapter> = emptyList(),
+    val previewStreamUrl: String = "",
+    val previewHeaders: Map<String, String> = emptyMap(),
+    val detectedPlaylistUrl: String? = null
+)
+
+data class PlaylistEntry(
+    val id: String,
+    val title: String,
+    val url: String,
+    val durationText: String
+)
+
+data class PlaylistInfo(
+    val title: String,
+    val uploader: String,
+    val entries: List<PlaylistEntry>
 )
 
 data class SelectedFormat(
@@ -60,11 +77,44 @@ object DownloaderEngine {
 
     fun isBusy(): Boolean = activeTasks.get() > 0
 
+    fun clearCache() {
+        infoCache.evictAll()
+    }
+
     fun cancelDownload(processId: String = DEFAULT_PROCESS_ID): Boolean {
         return try {
             YoutubeDL.getInstance().destroyProcessById(processId)
         } catch (e: Exception) {
             false
+        }
+    }
+
+    fun isDirectPlaylistUrl(rawUrl: String): Boolean {
+        val clean = sanitizeUrl(rawUrl)
+        return try {
+            val uri = Uri.parse(clean)
+            val listId = uri.getQueryParameter("list")
+            val videoId = uri.getQueryParameter("v")
+            !listId.isNullOrBlank() && videoId.isNullOrBlank()
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun extractPlaylistUrlIfPresent(rawUrl: String): String? {
+        val clean = sanitizeUrl(rawUrl)
+        return try {
+            val uri = Uri.parse(clean)
+            val listId = uri.getQueryParameter("list")?.takeIf { it.isNotBlank() } ?: return null
+            if (isDirectPlaylistUrl(clean)) return clean
+            val host = uri.host?.lowercase().orEmpty()
+            if (host.contains("youtube.com") || host.contains("youtu.be")) {
+                "https://www.youtube.com/playlist?list=$listId"
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -162,7 +212,10 @@ object DownloaderEngine {
         }
     }
 
-    suspend fun fetchInfo(rawUrl: String): Result<VideoInfo> = withContext(Dispatchers.IO) {
+    suspend fun fetchInfo(
+        rawUrl: String,
+        context: Context? = null
+    ): Result<VideoInfo> = withContext(Dispatchers.IO) {
         val cleanUrl = sanitizeUrl(rawUrl)
         if (cleanUrl.isBlank()) {
             return@withContext Result.failure(IllegalArgumentException("Link inválido ou vazio."))
@@ -184,6 +237,11 @@ object DownloaderEngine {
             val request = YoutubeDLRequest(cleanUrl).apply {
                 addOption("--no-playlist")
                 addOption("--socket-timeout", "15")
+                if (context != null) {
+                    CookieAuthManager.getCookiesFile(context)?.let { cookieFile ->
+                        addOption("--cookies", cookieFile.absolutePath)
+                    }
+                }
             }
 
             val ytInfo = YoutubeDL.getInstance().getInfo(request)
@@ -203,6 +261,12 @@ object DownloaderEngine {
 
             val (formatSizesMb, audioSizeMb) = computeEstimatedSizes(formats, durationSecs)
             val chapters = extractChapters(ytInfo.description, durationSecs)
+            val (previewUrl, previewHeaders) = selectPreviewStream(
+                formats = formats,
+                fallbackUrl = ytInfo.url.orEmpty(),
+                fallbackHeaders = ytInfo.httpHeaders.orEmpty()
+            )
+            val playlistCandidate = extractPlaylistUrlIfPresent(cleanUrl)
 
             val info = VideoInfo(
                 title = ytInfo.title ?: "Sem título",
@@ -214,7 +278,10 @@ object DownloaderEngine {
                 availableHeights = sortedHeights,
                 formatSizesMb = formatSizesMb,
                 audioSizeMb = audioSizeMb,
-                chapters = chapters
+                chapters = chapters,
+                previewStreamUrl = previewUrl,
+                previewHeaders = previewHeaders,
+                detectedPlaylistUrl = playlistCandidate
             )
             infoCache.put(cleanUrl, info)
             Result.success(info)
@@ -223,6 +290,127 @@ object DownloaderEngine {
         } finally {
             activeTasks.decrementAndGet()
         }
+    }
+
+    suspend fun fetchPlaylistInfo(
+        rawUrl: String,
+        context: Context? = null
+    ): Result<PlaylistInfo> = withContext(Dispatchers.IO) {
+        val cleanUrl = sanitizeUrl(rawUrl)
+        if (cleanUrl.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Link de playlist inválido."))
+        }
+
+        activeTasks.incrementAndGet()
+        try {
+            val ready = KliprApp.awaitEngineReady()
+            if (!ready) {
+                return@withContext Result.failure(
+                    IllegalStateException("Motores nativos ainda não inicializados.")
+                )
+            }
+
+            val request = YoutubeDLRequest(cleanUrl).apply {
+                addOption("--flat-playlist")
+                addOption("--dump-single-json")
+                addOption("--socket-timeout", "20")
+                if (context != null) {
+                    CookieAuthManager.getCookiesFile(context)?.let { cookieFile ->
+                        addOption("--cookies", cookieFile.absolutePath)
+                    }
+                }
+            }
+
+            val response = YoutubeDL.getInstance().execute(request, null, null)
+            val json = JSONObject(response.out)
+            val title = json.optString("title", "").ifBlank { "Playlist Klipr" }
+            val uploader = json.optString("uploader", "")
+                .ifBlank { json.optString("channel", "Playlist") }
+
+            val entriesArr = json.optJSONArray("entries")
+            val entries = mutableListOf<PlaylistEntry>()
+            if (entriesArr != null) {
+                for (i in 0 until entriesArr.length()) {
+                    val obj = entriesArr.optJSONObject(i) ?: continue
+                    val entryTitle = obj.optString("title", "")
+                    if (entryTitle.isBlank() ||
+                        entryTitle == "[Deleted video]" ||
+                        entryTitle == "[Private video]"
+                    ) {
+                        continue
+                    }
+                    val id = obj.optString("id", "${i + 1}")
+                    val rawEntryUrl = obj.optString("webpage_url", "")
+                        .ifBlank { obj.optString("url", "") }
+                    val finalEntryUrl = when {
+                        rawEntryUrl.startsWith("http", ignoreCase = true) -> rawEntryUrl
+                        id.isNotBlank() -> "https://www.youtube.com/watch?v=$id"
+                        else -> ""
+                    }
+                    if (finalEntryUrl.isBlank()) continue
+
+                    val durSecs = obj.optDouble("duration", 0.0).toLong().coerceAtLeast(0L)
+                    entries.add(
+                        PlaylistEntry(
+                            id = id,
+                            title = entryTitle,
+                            url = finalEntryUrl,
+                            durationText = if (durSecs > 0L) formatDuration(durSecs) else "--:--"
+                        )
+                    )
+                }
+            }
+
+            if (entries.isEmpty()) {
+                return@withContext Result.failure(
+                    IllegalStateException("Nenhum item disponível encontrado nesta playlist.")
+                )
+            }
+
+            Result.success(
+                PlaylistInfo(
+                    title = title,
+                    uploader = uploader,
+                    entries = entries
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            activeTasks.decrementAndGet()
+        }
+    }
+
+    private fun selectPreviewStream(
+        formats: List<VideoFormat>,
+        fallbackUrl: String,
+        fallbackHeaders: Map<String, String>
+    ): Pair<String, Map<String, String>> {
+        val muxed = formats.filter { fmt ->
+            !fmt.url.isNullOrBlank() &&
+                !fmt.vcodec.equals("none", ignoreCase = true) &&
+                !fmt.acodec.equals("none", ignoreCase = true)
+        }
+
+        val bestMuxed = muxed
+            .filter { it.height in 240..720 }
+            .maxByOrNull { it.height }
+            ?: muxed.maxByOrNull { it.height }
+
+        if (bestMuxed != null && !bestMuxed.url.isNullOrBlank()) {
+            return bestMuxed.url!! to (bestMuxed.httpHeaders ?: fallbackHeaders)
+        }
+
+        val fallbackVideo = formats
+            .filter { !it.url.isNullOrBlank() && it.height in 240..720 }
+            .maxByOrNull { it.height }
+            ?: formats.firstOrNull { !it.url.isNullOrBlank() && it.height > 0 }
+
+        if (fallbackVideo != null && !fallbackVideo.url.isNullOrBlank()) {
+            return fallbackVideo.url!! to (fallbackVideo.httpHeaders ?: fallbackHeaders)
+        }
+
+        return fallbackUrl to fallbackHeaders
     }
 
     private fun estimateFormatBytes(fmt: VideoFormat, durationSecs: Long): Long {
@@ -353,7 +541,6 @@ object DownloaderEngine {
 
             val request = YoutubeDLRequest(cleanUrl)
 
-            // Tratamento do nome do arquivo com indicação de corte se ativo
             var safeBaseName = if (!customFileName.isNullOrBlank()) {
                 customFileName.replace(Regex("[\\\\/:*?\"<>|]"), "").trim().take(70)
             } else {
@@ -370,8 +557,15 @@ object DownloaderEngine {
             request.addOption("-o", outputTemplate)
             request.addOption("--no-mtime")
             request.addOption("--no-playlist")
+            request.addOption("--continue")
+            request.addOption("--part")
             request.addOption("--concurrent-fragments", "4")
             request.addOption("--buffer-size", "16K")
+
+            // Cookies salvos para vídeos privados / restritos
+            CookieAuthManager.getCookiesFile(context)?.let { cookieFile ->
+                request.addOption("--cookies", cookieFile.absolutePath)
+            }
 
             // Motor C++ Aria2c (16 conexões simultâneas) quando não há recorte por seção
             if (trim == null && KliprPreferences.isAria2cEnabled(context)) {
@@ -444,6 +638,7 @@ object DownloaderEngine {
 
             Result.success(finalFile)
         } catch (e: YoutubeDL.CanceledException) {
+            // Apenas cancelamento explícito limpa os fragmentos .part; falhas de rede preservam para retomada
             cleanupTempFiles(targetDir, startTimeMs)
             Result.failure(e)
         } catch (e: YoutubeDLException) {

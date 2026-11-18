@@ -83,6 +83,10 @@ dependencies {
     // Coil (Image loading for thumbnails)
     implementation("io.coil-kt:coil-compose:2.7.0")
 
+    // Media3 ExoPlayer (Mini-Player de prévia de corte)
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
+
     // YoutubeDL Android Core, FFmpeg & Aria2c (Multi-Conexão C++)
     implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlVersion")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlVersion")

@@ -299,6 +299,8 @@ fun TrimControlsPanel(
     isAudioMode: Boolean,
     chapters: List<VideoChapter>,
     enabled: Boolean,
+    previewStreamUrl: String = "",
+    previewHeaders: Map<String, String> = emptyMap(),
     onRangeChange: (Long, Long) -> Unit,
     onNudgeStart: (Long) -> Unit,
     onNudgeEnd: (Long) -> Unit,
@@ -361,6 +363,16 @@ fun TrimControlsPanel(
                     activeTrackColor = KliprSecondary,
                     inactiveTrackColor = KliprBorder
                 )
+            )
+        }
+
+        // Mini-Player de Prévia do Corte (Media3 ExoPlayer)
+        if (previewStreamUrl.isNotBlank()) {
+            TrimPreviewPlayerSection(
+                streamUrl = previewStreamUrl,
+                headers = previewHeaders,
+                trimStartSeconds = trimStartSeconds,
+                trimEndSeconds = trimEndSeconds
             )
         }
 
@@ -565,6 +577,8 @@ fun DownloadStatusAndActionsCard(
     statusMessage: String,
     isError: Boolean,
     completedFile: File?,
+    canRetry: Boolean = false,
+    onRetry: (() -> Unit)? = null,
     onOpenDownloads: () -> Unit
 ) {
     if (statusMessage.isBlank()) return
@@ -598,6 +612,26 @@ fun DownloadStatusAndActionsCard(
                 fontSize = 13.sp,
                 fontWeight = if (isSuccess) FontWeight.SemiBold else FontWeight.Normal
             )
+            if (isError && canRetry && onRetry != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Button(
+                    onClick = onRetry,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = KliprPrimary,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text(
+                        text = "🔄 Retomar Download de Onde Parou",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
             if (isSuccess) {
                 Spacer(modifier = Modifier.height(12.dp))
                 val file = completedFile?.takeIf { it.exists() && it.isFile }

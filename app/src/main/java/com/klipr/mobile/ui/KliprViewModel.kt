@@ -6,13 +6,16 @@ import androidx.lifecycle.viewModelScope
 import com.klipr.mobile.KliprApp
 import com.klipr.mobile.data.AppReleaseInfo
 import com.klipr.mobile.data.AppUpdater
+import com.klipr.mobile.data.CookieAuthManager
 import com.klipr.mobile.data.DownloadHistoryItem
 import com.klipr.mobile.data.DownloaderEngine
 import com.klipr.mobile.data.KliprPreferences
+import com.klipr.mobile.data.PlaylistInfo
 import com.klipr.mobile.data.SelectedFormat
 import com.klipr.mobile.data.TimeTrim
 import com.klipr.mobile.data.VideoChapter
 import com.klipr.mobile.data.VideoInfo
+import com.klipr.mobile.service.BatchDownloadItem
 import com.klipr.mobile.service.DownloadForegroundService
 import com.klipr.mobile.service.DownloadServiceState
 import com.klipr.mobile.ui.theme.AppThemeMode
@@ -21,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 data class KliprUiState(
     val urlText: String = "",
@@ -28,6 +32,15 @@ data class KliprUiState(
     val inspectStatusMessage: String = "",
     val inspectIsError: Boolean = false,
     val videoInfo: VideoInfo? = null,
+    val playlistInfo: PlaylistInfo? = null,
+    val selectedPlaylistIds: Set<String> = emptySet(),
+    val playlistIsAudioMode: Boolean = false,
+    val playlistFormat: SelectedFormat = SelectedFormat(
+        isAudio = false,
+        height = 1080,
+        ext = "mp4",
+        label = "1080p Full HD"
+    ),
     val isAudioMode: Boolean = false,
     val selectedFormat: SelectedFormat = SelectedFormat(),
     val isTrimmingEnabled: Boolean = false,
@@ -43,8 +56,10 @@ data class KliprUiState(
     val recentDownloads: List<DownloadHistoryItem> = emptyList(),
     val savedSubfolders: List<String> = KliprPreferences.DEFAULT_FOLDERS,
     val hapticTick: Int = 0,
-    // Temas, Motor & Auto-Update
+    // Temas, Motor, Cookies & Auto-Update
     val showSettingsSheet: Boolean = false,
+    val showCookieDialog: Boolean = false,
+    val hasSavedCookies: Boolean = false,
     val currentTheme: AppThemeMode = AppThemeMode.DARK_AURORA,
     val useAria2c: Boolean = true,
     val useNightlyYtDlp: Boolean = true,
@@ -67,6 +82,7 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
         KliprUiState(
             recentDownloads = KliprPreferences.loadHistory(appContext),
             savedSubfolders = KliprPreferences.loadSubfolders(appContext),
+            hasSavedCookies = CookieAuthManager.hasSavedCookies(appContext),
             currentTheme = AppThemeMode.fromId(KliprPreferences.getThemeMode(appContext)),
             useAria2c = KliprPreferences.isAria2cEnabled(appContext),
             useNightlyYtDlp = KliprPreferences.isNightlyYtDlpEnabled(appContext),
@@ -114,9 +130,29 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 showSettingsSheet = show,
+                hasSavedCookies = CookieAuthManager.hasSavedCookies(appContext),
                 ytDlpVersion = KliprApp.getYtDlpVersion(appContext)
             )
         }
+    }
+
+    fun setShowCookieDialog(show: Boolean) {
+        _uiState.update { it.copy(showCookieDialog = show) }
+    }
+
+    fun onCookiesUpdated() {
+        _uiState.update {
+            it.copy(
+                showCookieDialog = false,
+                hasSavedCookies = CookieAuthManager.hasSavedCookies(appContext)
+            )
+        }
+    }
+
+    fun clearCookies() {
+        CookieAuthManager.clearCookies(appContext)
+        DownloaderEngine.clearCache()
+        _uiState.update { it.copy(hasSavedCookies = false) }
     }
 
     fun selectTheme(mode: AppThemeMode) {
@@ -249,6 +285,8 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 urlText = "",
                 videoInfo = null,
+                playlistInfo = null,
+                selectedPlaylistIds = emptySet(),
                 inspectStatusMessage = "",
                 inspectIsError = false
             )
@@ -259,6 +297,11 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
         val clean = DownloaderEngine.sanitizeUrl(rawUrl)
         if (clean.isBlank()) return
 
+        if (DownloaderEngine.isDirectPlaylistUrl(clean)) {
+            inspectPlaylistUrl(clean)
+            return
+        }
+
         DownloadForegroundService.clearStatus()
         _uiState.update {
             it.copy(
@@ -267,12 +310,14 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
                 inspectStatusMessage = "Mapeando resoluções e faixas de mídia...",
                 inspectIsError = false,
                 videoInfo = null,
+                playlistInfo = null,
+                selectedPlaylistIds = emptySet(),
                 clipboardSuggestionUrl = null
             )
         }
 
         viewModelScope.launch {
-            val result = DownloaderEngine.fetchInfo(clean)
+            val result = DownloaderEngine.fetchInfo(clean, appContext)
             result.onSuccess { info ->
                 val defaultHeight = info.availableHeights.firstOrNull() ?: 1080
                 val currentAudioMode = _uiState.value.isAudioMode
@@ -312,6 +357,106 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    fun inspectPlaylistUrl(rawUrl: String) {
+        val clean = DownloaderEngine.sanitizeUrl(rawUrl)
+        if (clean.isBlank()) return
+
+        DownloadForegroundService.clearStatus()
+        _uiState.update {
+            it.copy(
+                urlText = clean,
+                isInspecting = true,
+                inspectStatusMessage = "Carregando itens da playlist...",
+                inspectIsError = false,
+                videoInfo = null,
+                playlistInfo = null,
+                selectedPlaylistIds = emptySet(),
+                clipboardSuggestionUrl = null
+            )
+        }
+
+        viewModelScope.launch {
+            val result = DownloaderEngine.fetchPlaylistInfo(clean, appContext)
+            result.onSuccess { plInfo ->
+                _uiState.update {
+                    it.copy(
+                        isInspecting = false,
+                        inspectStatusMessage = "",
+                        inspectIsError = false,
+                        playlistInfo = plInfo,
+                        selectedPlaylistIds = plInfo.entries.map { e -> e.id }.toSet(),
+                        hapticTick = it.hapticTick + 1
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isInspecting = false,
+                        inspectStatusMessage = "Erro ao ler playlist: ${err.message}",
+                        inspectIsError = true
+                    )
+                }
+            }
+        }
+    }
+
+    fun togglePlaylistEntry(entryId: String) {
+        _uiState.update { state ->
+            val current = state.selectedPlaylistIds.toMutableSet()
+            if (!current.add(entryId)) {
+                current.remove(entryId)
+            }
+            state.copy(selectedPlaylistIds = current)
+        }
+    }
+
+    fun selectAllPlaylist() {
+        val pl = _uiState.value.playlistInfo ?: return
+        _uiState.update { it.copy(selectedPlaylistIds = pl.entries.map { e -> e.id }.toSet()) }
+    }
+
+    fun clearPlaylistSelection() {
+        _uiState.update { it.copy(selectedPlaylistIds = emptySet()) }
+    }
+
+    fun setPlaylistMediaMode(isAudio: Boolean) {
+        val format = if (isAudio) {
+            SelectedFormat(isAudio = true, ext = "mp3", label = "MP3 (320kbps)")
+        } else {
+            SelectedFormat(isAudio = false, height = 1080, ext = "mp4", label = "1080p Full HD")
+        }
+        _uiState.update { it.copy(playlistIsAudioMode = isAudio, playlistFormat = format) }
+    }
+
+    fun selectPlaylistFormat(format: SelectedFormat) {
+        _uiState.update { it.copy(playlistFormat = format) }
+    }
+
+    fun downloadSelectedPlaylistEntries() {
+        val state = _uiState.value
+        val pl = state.playlistInfo ?: return
+        val selectedEntries = pl.entries.filter { it.id in state.selectedPlaylistIds }
+        if (selectedEntries.isEmpty()) return
+
+        val safeSubfolder = pl.title.replace(Regex("[\\\\/:*?\"<>|]"), "").trim().take(36)
+            .ifBlank { state.targetSubfolder }
+
+        val batch = selectedEntries.mapIndexed { idx, entry ->
+            val prefix = String.format(Locale.US, "%02d - ", idx + 1)
+            val safeTitle = entry.title.replace(Regex("[\\\\/:*?\"<>|]"), "").trim().take(55)
+            BatchDownloadItem(
+                url = entry.url,
+                title = entry.title,
+                format = state.playlistFormat,
+                customFileName = "$prefix$safeTitle",
+                subfolder = safeSubfolder
+            )
+        }
+
+        DownloadForegroundService.enqueueBatch(appContext, batch)
+        _uiState.update { it.copy(hapticTick = it.hapticTick + 1) }
     }
 
     fun checkClipboardForSuggestion(clipboardText: String?) {
@@ -493,6 +638,10 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    fun retryFailedDownload() {
+        DownloadForegroundService.retryLastFailed(appContext)
+    }
+
     fun cancelDownload() {
         DownloadForegroundService.cancelDownload(appContext)
     }
@@ -501,7 +650,8 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 recentDownloads = KliprPreferences.loadHistory(appContext),
-                savedSubfolders = KliprPreferences.loadSubfolders(appContext)
+                savedSubfolders = KliprPreferences.loadSubfolders(appContext),
+                hasSavedCookies = CookieAuthManager.hasSavedCookies(appContext)
             )
         }
     }

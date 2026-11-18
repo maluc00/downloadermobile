@@ -114,6 +114,7 @@ private fun QuickShareBottomSheet(
 
     val targetUrl = urlEvent.first
     var isInspecting by remember { mutableStateOf(true) }
+    var isDirectPlaylist by remember { mutableStateOf(false) }
     var inspectError by remember { mutableStateOf<String?>(null) }
     var videoInfo by remember { mutableStateOf<VideoInfo?>(null) }
     var retryCounter by remember { mutableIntStateOf(0) }
@@ -187,10 +188,18 @@ private fun QuickShareBottomSheet(
 
     LaunchedEffect(urlEvent, retryCounter) {
         if (targetUrl.isBlank()) return@LaunchedEffect
+        if (DownloaderEngine.isDirectPlaylistUrl(targetUrl)) {
+            isInspecting = false
+            isDirectPlaylist = true
+            inspectError = null
+            videoInfo = null
+            return@LaunchedEffect
+        }
+        isDirectPlaylist = false
         isInspecting = true
         inspectError = null
         videoInfo = null
-        val result = DownloaderEngine.fetchInfo(targetUrl)
+        val result = DownloaderEngine.fetchInfo(targetUrl, activity)
         isInspecting = false
         result.onSuccess { info ->
             videoInfo = info
@@ -299,6 +308,47 @@ private fun QuickShareBottomSheet(
                                 color = KliprTextSecondary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (isDirectPlaylist) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = KliprSurface,
+                    border = BorderStroke(1.dp, KliprSecondary.copy(alpha = 0.5f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "📑 Playlist detectada!",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = KliprTextPrimary
+                        )
+                        Text(
+                            text = "Abra no app completo para selecionar exatamente quais músicas ou vídeos deseja baixar na fila.",
+                            fontSize = 12.sp,
+                            color = KliprTextSecondary
+                        )
+                        Button(
+                            onClick = { onOpenFullApp(targetUrl) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(50.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = KliprPrimary)
+                        ) {
+                            Text(
+                                text = "↗️ Selecionar Itens da Playlist",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
                             )
                         }
                     }
@@ -430,6 +480,8 @@ private fun QuickShareBottomSheet(
                         isAudioMode = isAudioMode,
                         chapters = info.chapters,
                         enabled = true,
+                        previewStreamUrl = info.previewStreamUrl,
+                        previewHeaders = info.previewHeaders,
                         onRangeChange = { s, e ->
                             val maxSecs = info.durationSeconds.coerceAtLeast(1L)
                             val safeEnd = e.coerceIn(1L.coerceAtMost(maxSecs), maxSecs)

@@ -55,6 +55,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.klipr.mobile.data.DownloadHistoryItem
 import com.klipr.mobile.data.DownloaderEngine
+import com.klipr.mobile.data.PlaylistInfo
+import com.klipr.mobile.data.SelectedFormat
+import com.klipr.mobile.ui.CookieLoginDialog
 import com.klipr.mobile.ui.DownloadStatusAndActionsCard
 import com.klipr.mobile.ui.FormatSelectorSection
 import com.klipr.mobile.ui.KliprViewModel
@@ -214,24 +217,36 @@ fun KliprPocketScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val windowInfo = LocalWindowInfo.current
 
+    var pendingBatchPlaylist by remember { mutableStateOf(false) }
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) {
-        viewModel.startDownload()
+        if (pendingBatchPlaylist) {
+            pendingBatchPlaylist = false
+            viewModel.downloadSelectedPlaylistEntries()
+        } else {
+            viewModel.startDownload()
+        }
     }
 
-    fun triggerDownloadWithPermissionCheck() {
+    fun triggerDownloadWithPermissionCheck(isBatchPlaylist: Boolean = false) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
             if (!granted) {
+                pendingBatchPlaylist = isBatchPlaylist
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 return
             }
         }
-        viewModel.startDownload()
+        if (isBatchPlaylist) {
+            viewModel.downloadSelectedPlaylistEntries()
+        } else {
+            viewModel.startDownload()
+        }
     }
 
     fun readClipboardText(): String? {
@@ -600,6 +615,27 @@ fun KliprPocketScreen(
                 Column(modifier = Modifier.padding(14.dp)) {
                     MediaInfoHeader(info = info)
 
+                    info.detectedPlaylistUrl?.let { plUrl ->
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { viewModel.inspectPlaylistUrl(plUrl) },
+                            shape = RoundedCornerShape(10.dp),
+                            color = KliprSecondary.copy(alpha = 0.14f),
+                            border = BorderStroke(1.dp, KliprSecondary.copy(alpha = 0.45f))
+                        ) {
+                            Text(
+                                text = "📑 Faz parte de uma Playlist — Toque para baixar em lote",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = KliprSecondary,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)
+                            )
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(14.dp))
                     HorizontalDivider(color = KliprBorder.copy(alpha = 0.6f))
                     Spacer(modifier = Modifier.height(12.dp))
@@ -689,6 +725,8 @@ fun KliprPocketScreen(
                             isAudioMode = uiState.isAudioMode,
                             chapters = info.chapters,
                             enabled = true,
+                            previewStreamUrl = info.previewStreamUrl,
+                            previewHeaders = info.previewHeaders,
                             onRangeChange = viewModel::updateTrimRangeSeconds,
                             onNudgeStart = viewModel::nudgeTrimStart,
                             onNudgeEnd = viewModel::nudgeTrimEnd,
@@ -905,6 +943,22 @@ fun KliprPocketScreen(
             }
         }
 
+        // Card de Playlist em Lote
+        uiState.playlistInfo?.let { plInfo ->
+            PlaylistBatchCard(
+                playlist = plInfo,
+                selectedIds = uiState.selectedPlaylistIds,
+                isAudioMode = uiState.playlistIsAudioMode,
+                selectedFormat = uiState.playlistFormat,
+                onToggleEntry = viewModel::togglePlaylistEntry,
+                onSelectAll = viewModel::selectAllPlaylist,
+                onClearAll = viewModel::clearPlaylistSelection,
+                onModeChange = viewModel::setPlaylistMediaMode,
+                onSelectFormat = viewModel::selectPlaylistFormat,
+                onDownloadSelected = { triggerDownloadWithPermissionCheck(isBatchPlaylist = true) }
+            )
+        }
+
         // Barra de Progresso
         if (dlState.isDownloading) {
             Spacer(modifier = Modifier.height(14.dp))
@@ -928,12 +982,14 @@ fun KliprPocketScreen(
                 statusMessage = activeStatus,
                 isError = activeError,
                 completedFile = dlState.completedFile,
+                canRetry = dlState.canRetry,
+                onRetry = viewModel::retryFailedDownload,
                 onOpenDownloads = onOpenDownloads
             )
         }
 
         // THUMB ZONE: Histórico de Downloads Recentes ou Guia Rápido
-        if (uiState.videoInfo == null && !uiState.isInspecting) {
+        if (uiState.videoInfo == null && uiState.playlistInfo == null && !uiState.isInspecting) {
             Spacer(modifier = Modifier.height(18.dp))
             if (uiState.recentDownloads.isNotEmpty()) {
                 RecentDownloadsSection(
@@ -959,8 +1015,250 @@ fun KliprPocketScreen(
             onToggleNightlyYtDlp = viewModel::setNightlyYtDlpEnabled,
             onUpdateYtDlpNow = viewModel::updateYtDlpNow,
             onCheckAppUpdateNow = { viewModel.checkAppUpdate(manual = true) },
-            onInstallAppUpdate = viewModel::downloadAndInstallAppUpdate
+            onInstallAppUpdate = viewModel::downloadAndInstallAppUpdate,
+            onOpenCookieLogin = {
+                viewModel.setShowSettingsSheet(false)
+                viewModel.setShowCookieDialog(true)
+            },
+            onClearCookies = viewModel::clearCookies
         )
+    }
+
+    if (uiState.showCookieDialog) {
+        CookieLoginDialog(
+            onDismiss = { viewModel.setShowCookieDialog(false) },
+            onCookiesSaved = viewModel::onCookiesUpdated
+        )
+    }
+}
+
+@Composable
+private fun PlaylistBatchCard(
+    playlist: PlaylistInfo,
+    selectedIds: Set<String>,
+    isAudioMode: Boolean,
+    selectedFormat: SelectedFormat,
+    onToggleEntry: (String) -> Unit,
+    onSelectAll: () -> Unit,
+    onClearAll: () -> Unit,
+    onModeChange: (Boolean) -> Unit,
+    onSelectFormat: (SelectedFormat) -> Unit,
+    onDownloadSelected: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, KliprBorder, RoundedCornerShape(16.dp)),
+        colors = CardDefaults.cardColors(containerColor = KliprCard),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Column {
+                Text(
+                    text = "📑 ${playlist.title}",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = KliprTextPrimary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${playlist.uploader} • ${playlist.entries.size} itens encontrados",
+                    fontSize = 12.sp,
+                    color = KliprTextSecondary
+                )
+            }
+
+            // Modo Vídeo vs Áudio para o lote
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .background(KliprSurface, RoundedCornerShape(12.dp))
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(9.dp))
+                        .clickable { onModeChange(false) },
+                    shape = RoundedCornerShape(9.dp),
+                    color = if (!isAudioMode) KliprPrimary else Color.Transparent
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "🎬 Vídeo",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (!isAudioMode) Color.White else KliprTextSecondary
+                        )
+                    }
+                }
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(9.dp))
+                        .clickable { onModeChange(true) },
+                    shape = RoundedCornerShape(9.dp),
+                    color = if (isAudioMode) KliprSecondary else Color.Transparent
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "🎵 Áudio",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isAudioMode) Color.White else KliprTextSecondary
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val options = if (!isAudioMode) {
+                    listOf(
+                        SelectedFormat(false, 1080, "mp4", "1080p Full HD"),
+                        SelectedFormat(false, 720, "mp4", "720p Rápido ⚡")
+                    )
+                } else {
+                    listOf(
+                        SelectedFormat(true, 0, "mp3", "MP3 (320kbps)"),
+                        SelectedFormat(true, 0, "m4a", "M4A (AAC ⚡)")
+                    )
+                }
+                options.forEach { fmt ->
+                    val active = selectedFormat.isAudio == fmt.isAudio &&
+                        selectedFormat.ext == fmt.ext &&
+                        selectedFormat.height == fmt.height
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onSelectFormat(fmt) },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (active) KliprPrimary.copy(alpha = 0.22f) else KliprSurface,
+                        border = BorderStroke(1.dp, if (active) KliprPrimary else KliprBorder)
+                    ) {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(8.dp)) {
+                            Text(
+                                text = fmt.label,
+                                fontSize = 12.sp,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                color = if (active) KliprTextPrimary else KliprTextSecondary
+                            )
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${selectedIds.size} selecionados",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = KliprSecondary
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onSelectAll) {
+                        Text("Todos", fontSize = 12.sp, color = KliprAccent, fontWeight = FontWeight.Bold)
+                    }
+                    TextButton(onClick = onClearAll) {
+                        Text("Limpar", fontSize = 12.sp, color = KliprTextSecondary)
+                    }
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 280.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                playlist.entries.forEachIndexed { idx, entry ->
+                    val checked = entry.id in selectedIds
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onToggleEntry(entry.id) },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (checked) KliprPrimary.copy(alpha = 0.14f) else KliprSurface,
+                        border = BorderStroke(1.dp, if (checked) KliprPrimary.copy(alpha = 0.5f) else KliprBorder)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = checked,
+                                onCheckedChange = null,
+                                colors = CheckboxDefaults.colors(checkedColor = KliprPrimary)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "${idx + 1}. ${entry.title}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = KliprTextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "⏱ ${entry.durationText}",
+                                    fontSize = 10.sp,
+                                    color = KliprTextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Button(
+                onClick = onDownloadSelected,
+                enabled = selectedIds.isNotEmpty(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                contentPadding = PaddingValues()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.horizontalGradient(listOf(KliprPrimary, KliprSecondary)),
+                            shape = RoundedCornerShape(14.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "📥 Baixar ${selectedIds.size} Itens na Fila",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+            }
+        }
     }
 }
 

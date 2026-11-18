@@ -14,3 +14,4 @@
 -dontwarn org.apache.commons.io.**
 -dontwarn java.nio.file.**
 -dontwarn javax.naming.**
+-dontwarn androidx.media3.**
