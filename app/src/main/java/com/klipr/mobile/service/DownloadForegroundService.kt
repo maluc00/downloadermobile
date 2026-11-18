@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -45,13 +46,25 @@ data class DownloadServiceState(
     val completedFile: File? = null,
     val isCompleted: Boolean = false,
     val isError: Boolean = false,
-    val completedTimestamp: Long = 0L
+    val completedTimestamp: Long = 0L,
+    val queuedCount: Int = 0
+)
+
+private data class QueuedDownload(
+    val url: String,
+    val title: String,
+    val format: SelectedFormat,
+    val trim: TimeTrim?,
+    val customFileName: String?,
+    val subfolder: String
 )
 
 class DownloadForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var downloadJob: Job? = null
+    private val queueLock = Any()
+    private val pendingQueue = ArrayDeque<QueuedDownload>()
+    private var queueProcessorJob: Job? = null
     private var activeProcessId: String = DownloaderEngine.DEFAULT_PROCESS_ID
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -64,12 +77,16 @@ class DownloadForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CANCEL -> {
+                synchronized(queueLock) {
+                    pendingQueue.clear()
+                }
                 DownloaderEngine.cancelDownload(activeProcessId)
-                downloadJob?.cancel()
+                queueProcessorJob?.cancel()
                 _downloadState.value = _downloadState.value.copy(
                     isDownloading = false,
                     isCompleted = false,
                     isError = false,
+                    queuedCount = 0,
                     statusMessage = "Download cancelado."
                 )
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -80,7 +97,7 @@ class DownloadForegroundService : Service() {
             ACTION_START -> {
                 val url = intent.getStringExtra(EXTRA_URL).orEmpty()
                 if (url.isBlank()) {
-                    stopSelf()
+                    if (queueProcessorJob?.isActive != true) stopSelf()
                     return START_NOT_STICKY
                 }
                 val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "Mídia Klipr" }
@@ -95,38 +112,90 @@ class DownloadForegroundService : Service() {
                 val customFileName = intent.getStringExtra(EXTRA_FILE_NAME)
                 val subfolder = intent.getStringExtra(EXTRA_SUBFOLDER).orEmpty().ifBlank { "Klipr" }
 
-                val format = SelectedFormat(
-                    isAudio = isAudio,
-                    height = height,
-                    ext = ext,
-                    label = formatLabel
+                val queuedItem = QueuedDownload(
+                    url = url,
+                    title = title,
+                    format = SelectedFormat(
+                        isAudio = isAudio,
+                        height = height,
+                        ext = ext,
+                        label = formatLabel
+                    ),
+                    trim = if (trimEnabled && trimStart.isNotBlank() && trimEnd.isNotBlank()) {
+                        TimeTrim(startTime = trimStart, endTime = trimEnd, accurateCut = trimAccurate)
+                    } else {
+                        null
+                    },
+                    customFileName = customFileName,
+                    subfolder = subfolder
                 )
-                val trim = if (trimEnabled && trimStart.isNotBlank() && trimEnd.isNotBlank()) {
-                    TimeTrim(startTime = trimStart, endTime = trimEnd, accurateCut = trimAccurate)
-                } else {
-                    null
+
+                val alreadyRunning: Boolean
+                val queueSizeAfterAdd: Int
+                synchronized(queueLock) {
+                    alreadyRunning = queueProcessorJob?.isActive == true
+                    pendingQueue.addLast(queuedItem)
+                    queueSizeAfterAdd = pendingQueue.size
                 }
 
-                // Garante startForeground imediato para respeitar o timeout do Android
-                val initialNotification = buildProgressNotification(
-                    title = title,
-                    progress = 0,
-                    status = "Preparando download..."
+                // Sempre chamar startForeground imediatamente para cumprir o contrato do Android
+                val currentState = _downloadState.value
+                val notifTitle = if (alreadyRunning && currentState.title.isNotBlank()) {
+                    currentState.title
+                } else {
+                    title
+                }
+                val notifProgress = if (alreadyRunning) currentState.progress.toInt() else 0
+                val notifStatus = if (alreadyRunning) {
+                    currentState.statusMessage.ifBlank { "Baixando..." }
+                } else {
+                    "Preparando download..."
+                }
+                val foregroundNotification = buildProgressNotification(
+                    title = notifTitle,
+                    progress = notifProgress,
+                    status = notifStatus,
+                    queuedCount = if (alreadyRunning) queueSizeAfterAdd else 0
                 )
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
                         PROGRESS_NOTIFICATION_ID,
-                        initialNotification,
+                        foregroundNotification,
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                     )
                 } else {
-                    startForeground(PROGRESS_NOTIFICATION_ID, initialNotification)
+                    startForeground(PROGRESS_NOTIFICATION_ID, foregroundNotification)
                 }
 
-                if (downloadJob?.isActive == true) {
-                    DownloaderEngine.cancelDownload(activeProcessId)
-                    downloadJob?.cancel()
+                if (alreadyRunning) {
+                    _downloadState.value = _downloadState.value.copy(queuedCount = queueSizeAfterAdd)
+                    Toast.makeText(
+                        this,
+                        "📥 Adicionado à fila ($queueSizeAfterAdd na espera)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return START_NOT_STICKY
                 }
+
+                startQueueProcessor()
+            }
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun startQueueProcessor() {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        queueProcessorJob = serviceScope.launch {
+            var nextCompletionId = COMPLETION_NOTIFICATION_ID_BASE
+            while (true) {
+                val item: QueuedDownload?
+                val remainingCount: Int
+                synchronized(queueLock) {
+                    item = pendingQueue.removeFirstOrNull()
+                    remainingCount = pendingQueue.size
+                }
+                if (item == null) break
 
                 activeProcessId = "klipr_${System.currentTimeMillis()}"
                 val processId = activeProcessId
@@ -135,106 +204,110 @@ class DownloadForegroundService : Service() {
                     isDownloading = true,
                     progress = 0f,
                     statusMessage = "Iniciando download...",
-                    title = title,
-                    url = url,
-                    formatLabel = formatLabel,
-                    isAudio = isAudio,
-                    targetSubfolder = subfolder,
+                    title = item.title,
+                    url = item.url,
+                    formatLabel = item.format.label,
+                    isAudio = item.format.isAudio,
+                    targetSubfolder = item.subfolder,
                     completedFile = null,
                     isCompleted = false,
-                    isError = false
+                    isError = false,
+                    queuedCount = remainingCount
                 )
 
-                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-                downloadJob = serviceScope.launch {
-                    val result = DownloaderEngine.startDownload(
-                        context = applicationContext,
-                        url = url,
-                        format = format,
-                        trim = trim,
-                        customFileName = customFileName,
-                        targetSubfolder = subfolder,
-                        processId = processId,
-                        onProgress = { progress, line ->
-                            _downloadState.value = _downloadState.value.copy(
-                                isDownloading = true,
-                                progress = progress,
-                                statusMessage = line
-                            )
-                            notificationManager.notify(
-                                PROGRESS_NOTIFICATION_ID,
-                                buildProgressNotification(
-                                    title = title,
-                                    progress = progress.toInt(),
-                                    status = line
-                                )
-                            )
-                        }
-                    )
-
-                    result.onSuccess { outputFile ->
-                        val realFile = outputFile.takeIf { it.isFile }
-                        KliprPreferences.saveCustomSubfolder(applicationContext, subfolder)
-                        if (realFile != null) {
-                            KliprPreferences.addHistoryItem(
-                                applicationContext,
-                                DownloadHistoryItem(
-                                    title = customFileName?.takeIf { it.isNotBlank() } ?: title,
-                                    filePath = realFile.absolutePath,
-                                    formatLabel = formatLabel,
-                                    timestamp = System.currentTimeMillis(),
-                                    isAudio = isAudio
-                                )
-                            )
-                        }
-
+                val result = DownloaderEngine.startDownload(
+                    context = applicationContext,
+                    url = item.url,
+                    format = item.format,
+                    trim = item.trim,
+                    customFileName = item.customFileName,
+                    targetSubfolder = item.subfolder,
+                    processId = processId,
+                    onProgress = { progress, line ->
+                        val currentQueued = synchronized(queueLock) { pendingQueue.size }
                         _downloadState.value = _downloadState.value.copy(
-                            isDownloading = false,
-                            progress = 100f,
-                            statusMessage = "✅ Concluído! Salvo em Downloads/$subfolder",
-                            completedFile = realFile,
-                            isCompleted = true,
-                            isError = false,
-                            completedTimestamp = System.currentTimeMillis()
+                            isDownloading = true,
+                            progress = progress,
+                            statusMessage = line,
+                            queuedCount = currentQueued
                         )
                         notificationManager.notify(
-                            COMPLETION_NOTIFICATION_ID,
-                            buildCompletionNotification(
-                                title = title,
-                                subfolder = subfolder,
-                                file = realFile
+                            PROGRESS_NOTIFICATION_ID,
+                            buildProgressNotification(
+                                title = item.title,
+                                progress = progress.toInt(),
+                                status = line,
+                                queuedCount = currentQueued
                             )
                         )
-                    }.onFailure { err ->
-                        val wasCanceled = err is YoutubeDL.CanceledException
-                        _downloadState.value = _downloadState.value.copy(
-                            isDownloading = false,
-                            isCompleted = false,
-                            isError = !wasCanceled,
-                            statusMessage = if (wasCanceled) {
-                                "Download cancelado."
-                            } else {
-                                "Erro no download: ${err.message}"
-                            }
-                        )
-                        if (!wasCanceled) {
-                            notificationManager.notify(
-                                COMPLETION_NOTIFICATION_ID,
-                                buildErrorNotification(title, err.message ?: "Falha inesperada")
+                    }
+                )
+
+                val currentQueuedAfter = synchronized(queueLock) { pendingQueue.size }
+
+                result.onSuccess { outputFile ->
+                    val realFile = outputFile.takeIf { it.isFile }
+                    KliprPreferences.saveCustomSubfolder(applicationContext, item.subfolder)
+                    if (realFile != null) {
+                        KliprPreferences.addHistoryItem(
+                            applicationContext,
+                            DownloadHistoryItem(
+                                title = item.customFileName?.takeIf { it.isNotBlank() } ?: item.title,
+                                filePath = realFile.absolutePath,
+                                formatLabel = item.format.label,
+                                timestamp = System.currentTimeMillis(),
+                                isAudio = item.format.isAudio
                             )
-                        }
+                        )
                     }
 
-                    ServiceCompat.stopForeground(
-                        this@DownloadForegroundService,
-                        ServiceCompat.STOP_FOREGROUND_REMOVE
+                    _downloadState.value = _downloadState.value.copy(
+                        isDownloading = currentQueuedAfter > 0,
+                        progress = 100f,
+                        statusMessage = "✅ Concluído! Salvo em Downloads/${item.subfolder}",
+                        completedFile = realFile,
+                        isCompleted = true,
+                        isError = false,
+                        completedTimestamp = System.currentTimeMillis(),
+                        queuedCount = currentQueuedAfter
                     )
-                    stopSelf()
+                    notificationManager.notify(
+                        nextCompletionId++,
+                        buildCompletionNotification(
+                            title = item.title,
+                            subfolder = item.subfolder,
+                            file = realFile,
+                            requestCodeSeed = nextCompletionId
+                        )
+                    )
+                }.onFailure { err ->
+                    val wasCanceled = err is YoutubeDL.CanceledException
+                    _downloadState.value = _downloadState.value.copy(
+                        isDownloading = currentQueuedAfter > 0,
+                        isCompleted = false,
+                        isError = !wasCanceled,
+                        statusMessage = if (wasCanceled) {
+                            "Download cancelado."
+                        } else {
+                            "Erro no download: ${err.message}"
+                        },
+                        queuedCount = currentQueuedAfter
+                    )
+                    if (!wasCanceled) {
+                        notificationManager.notify(
+                            nextCompletionId++,
+                            buildErrorNotification(item.title, err.message ?: "Falha inesperada")
+                        )
+                    }
                 }
             }
+
+            ServiceCompat.stopForeground(
+                this@DownloadForegroundService,
+                ServiceCompat.STOP_FOREGROUND_REMOVE
+            )
+            stopSelf()
         }
-        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -267,7 +340,8 @@ class DownloadForegroundService : Service() {
     private fun buildProgressNotification(
         title: String,
         progress: Int,
-        status: String
+        status: String,
+        queuedCount: Int
     ): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -289,9 +363,15 @@ class DownloadForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val headerText = if (queuedCount > 0) {
+            "Baixando (+$queuedCount na fila): $title"
+        } else {
+            "Baixando: $title"
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_PROGRESS)
             .setSmallIcon(R.drawable.ic_download)
-            .setContentTitle("Baixando: $title")
+            .setContentTitle(headerText)
             .setContentText(status)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -304,7 +384,8 @@ class DownloadForegroundService : Service() {
     private fun buildCompletionNotification(
         title: String,
         subfolder: String,
-        file: File?
+        file: File?,
+        requestCodeSeed: Int
     ): Notification {
         val builder = NotificationCompat.Builder(this, CHANNEL_DONE)
             .setSmallIcon(R.drawable.ic_download)
@@ -323,7 +404,7 @@ class DownloadForegroundService : Service() {
                 }
                 val openPending = PendingIntent.getActivity(
                     this,
-                    20,
+                    requestCodeSeed * 10 + 1,
                     viewIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
@@ -338,7 +419,7 @@ class DownloadForegroundService : Service() {
                 }
                 val sharePending = PendingIntent.getActivity(
                     this,
-                    21,
+                    requestCodeSeed * 10 + 2,
                     chooser,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
@@ -353,7 +434,7 @@ class DownloadForegroundService : Service() {
             val openAppIntent = Intent(this, MainActivity::class.java)
             val pending = PendingIntent.getActivity(
                 this,
-                22,
+                requestCodeSeed * 10 + 3,
                 openAppIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
@@ -384,7 +465,7 @@ class DownloadForegroundService : Service() {
         private const val CHANNEL_PROGRESS = "klipr_downloads"
         private const val CHANNEL_DONE = "klipr_downloads_done"
         private const val PROGRESS_NOTIFICATION_ID = 1001
-        private const val COMPLETION_NOTIFICATION_ID = 1002
+        private const val COMPLETION_NOTIFICATION_ID_BASE = 1002
 
         const val ACTION_START = "com.klipr.mobile.action.START_DOWNLOAD"
         const val ACTION_CANCEL = "com.klipr.mobile.action.CANCEL_DOWNLOAD"

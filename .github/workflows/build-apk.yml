@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,7 +35,7 @@ jobs:
           fi
 
       - name: Compilar APK Debug
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug -PversionCode=${{ github.run_number }} -PversionName=2.0.${{ github.run_number }} --stacktrace
 
       - name: Publicar APK como Artefato
         uses: actions/upload-artifact@v4
@@ -40,3 +43,10 @@ jobs:
           name: Klipr-Pocket-Debug
           path: app/build/outputs/apk/debug/*.apk
 
+      - name: Publicar GitHub Release (Auto-Update)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0.${{ github.run_number }}
+          name: Klipr Pocket v2.0.${{ github.run_number }}
+          body: "Build automático com motor yt-dlp/Aria2c/FFmpeg, 5 Temas e Bottom Sheet Rápido."
+          files: app/build/outputs/apk/debug/*.apk

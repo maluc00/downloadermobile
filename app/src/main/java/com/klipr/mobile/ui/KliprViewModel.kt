@@ -3,6 +3,9 @@ package com.klipr.mobile.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.klipr.mobile.KliprApp
+import com.klipr.mobile.data.AppReleaseInfo
+import com.klipr.mobile.data.AppUpdater
 import com.klipr.mobile.data.DownloadHistoryItem
 import com.klipr.mobile.data.DownloaderEngine
 import com.klipr.mobile.data.KliprPreferences
@@ -12,6 +15,7 @@ import com.klipr.mobile.data.VideoChapter
 import com.klipr.mobile.data.VideoInfo
 import com.klipr.mobile.service.DownloadForegroundService
 import com.klipr.mobile.service.DownloadServiceState
+import com.klipr.mobile.ui.theme.AppThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,7 +42,21 @@ data class KliprUiState(
     val clipboardSuggestionUrl: String? = null,
     val recentDownloads: List<DownloadHistoryItem> = emptyList(),
     val savedSubfolders: List<String> = KliprPreferences.DEFAULT_FOLDERS,
-    val hapticTick: Int = 0
+    val hapticTick: Int = 0,
+    // Temas, Motor & Auto-Update
+    val showSettingsSheet: Boolean = false,
+    val currentTheme: AppThemeMode = AppThemeMode.DARK_AURORA,
+    val useAria2c: Boolean = true,
+    val useNightlyYtDlp: Boolean = true,
+    val sponsorBlockEnabled: Boolean = false,
+    val ytDlpVersion: String = "...",
+    val isUpdatingYtDlp: Boolean = false,
+    val ytDlpUpdateStatus: String = "",
+    val availableAppUpdate: AppReleaseInfo? = null,
+    val isCheckingAppUpdate: Boolean = false,
+    val isDownloadingAppUpdate: Boolean = false,
+    val appUpdateProgress: Int = 0,
+    val appUpdateStatus: String = ""
 )
 
 class KliprViewModel(application: Application) : AndroidViewModel(application) {
@@ -48,7 +66,12 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(
         KliprUiState(
             recentDownloads = KliprPreferences.loadHistory(appContext),
-            savedSubfolders = KliprPreferences.loadSubfolders(appContext)
+            savedSubfolders = KliprPreferences.loadSubfolders(appContext),
+            currentTheme = AppThemeMode.fromId(KliprPreferences.getThemeMode(appContext)),
+            useAria2c = KliprPreferences.isAria2cEnabled(appContext),
+            useNightlyYtDlp = KliprPreferences.isNightlyYtDlpEnabled(appContext),
+            sponsorBlockEnabled = KliprPreferences.isSponsorBlockEnabled(appContext),
+            ytDlpVersion = KliprApp.getYtDlpVersion(appContext)
         )
     )
     val uiState: StateFlow<KliprUiState> = _uiState.asStateFlow()
@@ -72,6 +95,11 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        viewModelScope.launch {
+            KliprApp.awaitEngineReady()
+            _uiState.update { it.copy(ytDlpVersion = KliprApp.getYtDlpVersion(appContext)) }
+        }
+        checkAppUpdate(manual = false)
     }
 
     fun videoLabelForHeight(h: Int): String = when (h) {
@@ -80,6 +108,135 @@ class KliprViewModel(application: Application) : AndroidViewModel(application) {
         1080 -> "1080p Full HD"
         720 -> "720p Rápido ⚡"
         else -> "${h}p"
+    }
+
+    fun setShowSettingsSheet(show: Boolean) {
+        _uiState.update {
+            it.copy(
+                showSettingsSheet = show,
+                ytDlpVersion = KliprApp.getYtDlpVersion(appContext)
+            )
+        }
+    }
+
+    fun selectTheme(mode: AppThemeMode) {
+        KliprPreferences.setThemeMode(appContext, mode.id)
+        _uiState.update { it.copy(currentTheme = mode) }
+    }
+
+    fun setAria2cEnabled(enabled: Boolean) {
+        KliprPreferences.setAria2cEnabled(appContext, enabled)
+        _uiState.update { it.copy(useAria2c = enabled) }
+    }
+
+    fun setNightlyYtDlpEnabled(enabled: Boolean) {
+        KliprPreferences.setNightlyYtDlpEnabled(appContext, enabled)
+        _uiState.update { it.copy(useNightlyYtDlp = enabled) }
+    }
+
+    fun setSponsorBlockEnabled(enabled: Boolean) {
+        KliprPreferences.setSponsorBlockEnabled(appContext, enabled)
+        _uiState.update { it.copy(sponsorBlockEnabled = enabled) }
+    }
+
+    fun updateYtDlpNow() {
+        if (_uiState.value.isUpdatingYtDlp) return
+        _uiState.update {
+            it.copy(
+                isUpdatingYtDlp = true,
+                ytDlpUpdateStatus = "Verificando atualização do motor..."
+            )
+        }
+        viewModelScope.launch {
+            val nightly = _uiState.value.useNightlyYtDlp
+            val result = KliprApp.updateYtDlpNow(appContext, nightly)
+            result.onSuccess { msg ->
+                _uiState.update {
+                    it.copy(
+                        isUpdatingYtDlp = false,
+                        ytDlpVersion = KliprApp.getYtDlpVersion(appContext),
+                        ytDlpUpdateStatus = msg
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isUpdatingYtDlp = false,
+                        ytDlpUpdateStatus = "Falha ao atualizar motor: ${err.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun checkAppUpdate(manual: Boolean) {
+        if (_uiState.value.isCheckingAppUpdate) return
+        _uiState.update {
+            it.copy(
+                isCheckingAppUpdate = true,
+                appUpdateStatus = if (manual) "Consultando GitHub Releases..." else it.appUpdateStatus
+            )
+        }
+        viewModelScope.launch {
+            val result = AppUpdater.checkForUpdate()
+            result.onSuccess { release ->
+                _uiState.update {
+                    it.copy(
+                        isCheckingAppUpdate = false,
+                        availableAppUpdate = release,
+                        appUpdateStatus = when {
+                            release != null -> "Nova versão ${release.tagName} pronta para instalar!"
+                            manual -> "Você já está na versão mais recente."
+                            else -> ""
+                        }
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isCheckingAppUpdate = false,
+                        appUpdateStatus = if (manual) "Erro ao verificar atualização: ${err.message}" else ""
+                    )
+                }
+            }
+        }
+    }
+
+    fun downloadAndInstallAppUpdate() {
+        val release = _uiState.value.availableAppUpdate ?: return
+        if (_uiState.value.isDownloadingAppUpdate) return
+        _uiState.update {
+            it.copy(
+                isDownloadingAppUpdate = true,
+                appUpdateProgress = 0,
+                appUpdateStatus = "Baixando ${release.apkName}..."
+            )
+        }
+        viewModelScope.launch {
+            val result = AppUpdater.downloadAndInstallApk(appContext, release) { pct ->
+                _uiState.update { it.copy(appUpdateProgress = pct) }
+            }
+            result.onSuccess {
+                _uiState.update {
+                    it.copy(
+                        isDownloadingAppUpdate = false,
+                        appUpdateProgress = 100,
+                        appUpdateStatus = "Instalador aberto para ${release.tagName}."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isDownloadingAppUpdate = false,
+                        appUpdateStatus = "Erro ao baixar APK: ${err.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissAppUpdateBanner() {
+        _uiState.update { it.copy(availableAppUpdate = null) }
     }
 
     fun onUrlChanged(newUrl: String) {

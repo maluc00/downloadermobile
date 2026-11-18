@@ -373,6 +373,17 @@ object DownloaderEngine {
             request.addOption("--concurrent-fragments", "4")
             request.addOption("--buffer-size", "16K")
 
+            // Motor C++ Aria2c (16 conexões simultâneas) quando não há recorte por seção
+            if (trim == null && KliprPreferences.isAria2cEnabled(context)) {
+                request.addOption("--downloader", "libaria2c.so")
+                request.addOption("--external-downloader-args", "aria2c:-x 16 -s 16 -k 1M")
+            }
+
+            // SponsorBlock opcional (pula patrocínios e autopromoção)
+            if (KliprPreferences.isSponsorBlockEnabled(context)) {
+                request.addOption("--sponsorblock-remove", "sponsor,selfpromo")
+            }
+
             // INJEÇÃO DO CORTE DE TRECHO (Download Sections)
             if (trim != null && trim.startTime.isNotBlank() && trim.endTime.isNotBlank()) {
                 request.addOption("--download-sections", "*${trim.startTime.trim()}-${trim.endTime.trim()}")

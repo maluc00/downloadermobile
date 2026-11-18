@@ -1,6 +1,9 @@
 package com.klipr.mobile.data
 
 import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -18,10 +21,83 @@ object KliprPreferences {
     private const val PREFS_NAME = "klipr_prefs"
     private const val KEY_HISTORY = "recent_downloads_json"
     private const val KEY_CUSTOM_FOLDERS = "custom_subfolders_json"
+    private const val KEY_THEME_MODE = "theme_mode"
+    private const val KEY_USE_ARIA2C = "use_aria2c"
+    private const val KEY_USE_NIGHTLY_YTDLP = "use_nightly_ytdlp"
+    private const val KEY_LAST_YTDLP_UPDATE_MS = "last_ytdlp_update_ms"
+    private const val KEY_SPONSOR_BLOCK = "sponsor_block_enabled"
+
     private const val MAX_HISTORY_ITEMS = 15
     private const val MAX_CUSTOM_FOLDERS = 3
+    private const val YTDLP_AUTO_UPDATE_INTERVAL_MS = 24L * 60L * 60L * 1000L
 
     val DEFAULT_FOLDERS = listOf("Klipr", "Músicas", "Cortes", "Status")
+
+    private val _themeModeFlow = MutableStateFlow("aurora")
+    val themeModeFlow: StateFlow<String> = _themeModeFlow.asStateFlow()
+
+    fun syncFromStorage(context: Context) {
+        _themeModeFlow.value = getThemeMode(context)
+    }
+
+    fun getThemeMode(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_THEME_MODE, "aurora") ?: "aurora"
+    }
+
+    fun setThemeMode(context: Context, modeId: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_THEME_MODE, modeId)
+            .apply()
+        _themeModeFlow.value = modeId
+    }
+
+    fun isAria2cEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_USE_ARIA2C, true)
+
+    fun setAria2cEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_USE_ARIA2C, enabled)
+            .apply()
+    }
+
+    fun isNightlyYtDlpEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_USE_NIGHTLY_YTDLP, true)
+
+    fun setNightlyYtDlpEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_USE_NIGHTLY_YTDLP, enabled)
+            .apply()
+    }
+
+    fun isSponsorBlockEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SPONSOR_BLOCK, false)
+
+    fun setSponsorBlockEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_SPONSOR_BLOCK, enabled)
+            .apply()
+    }
+
+    fun shouldAutoUpdateYtDlp(context: Context): Boolean {
+        val lastMs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_YTDLP_UPDATE_MS, 0L)
+        return (System.currentTimeMillis() - lastMs) >= YTDLP_AUTO_UPDATE_INTERVAL_MS
+    }
+
+    fun markYtDlpUpdated(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_YTDLP_UPDATE_MS, System.currentTimeMillis())
+            .apply()
+    }
 
     fun loadHistory(context: Context): List<DownloadHistoryItem> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

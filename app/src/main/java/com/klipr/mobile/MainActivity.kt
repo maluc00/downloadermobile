@@ -41,7 +41,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -52,6 +51,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.klipr.mobile.data.DownloadHistoryItem
 import com.klipr.mobile.data.DownloaderEngine
@@ -59,6 +59,7 @@ import com.klipr.mobile.ui.DownloadStatusAndActionsCard
 import com.klipr.mobile.ui.FormatSelectorSection
 import com.klipr.mobile.ui.KliprViewModel
 import com.klipr.mobile.ui.MediaInfoHeader
+import com.klipr.mobile.ui.SettingsAndThemesSheet
 import com.klipr.mobile.ui.TrimControlsPanel
 import com.klipr.mobile.ui.theme.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,10 +70,6 @@ class MainActivity : ComponentActivity() {
     private val sharedUrlEvent = MutableStateFlow<Pair<String, Long>>("" to 0L)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
-        )
         super.onCreate(savedInstanceState)
 
         val initialSharedUrl = extractUrlFromIntent(intent)
@@ -83,6 +80,28 @@ class MainActivity : ComponentActivity() {
         setContent {
             val currentSharedEvent by sharedUrlEvent.collectAsState()
             KliprTheme {
+                val isDark = LocalKliprPalette.current.isDark
+                SideEffect {
+                    enableEdgeToEdge(
+                        statusBarStyle = if (isDark) {
+                            SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                        } else {
+                            SystemBarStyle.light(
+                                android.graphics.Color.TRANSPARENT,
+                                android.graphics.Color.TRANSPARENT
+                            )
+                        },
+                        navigationBarStyle = if (isDark) {
+                            SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                        } else {
+                            SystemBarStyle.light(
+                                android.graphics.Color.TRANSPARENT,
+                                android.graphics.Color.TRANSPARENT
+                            )
+                        }
+                    )
+                }
+
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
@@ -97,7 +116,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: Intent?) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         val newUrl = extractUrlFromIntent(intent)
@@ -233,14 +252,12 @@ fun KliprPocketScreen(
         }
     }
 
-    // Haptics quando análise ou download finalizam
     LaunchedEffect(uiState.hapticTick) {
         if (uiState.hapticTick > 0) {
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         }
     }
 
-    // Recebe URLs compartilhadas / pré-preenchidas
     LaunchedEffect(sharedUrlEvent) {
         val sharedUrl = sharedUrlEvent.first
         if (sharedUrl.isNotBlank()) {
@@ -248,7 +265,6 @@ fun KliprPocketScreen(
         }
     }
 
-    // Atualiza histórico no ON_RESUME
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
@@ -259,7 +275,6 @@ fun KliprPocketScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Detecta URL copiada quando a janela ganha foco (Android 10+ exige foco para ler clipboard)
     LaunchedEffect(windowInfo.isWindowFocused) {
         if (windowInfo.isWindowFocused) {
             viewModel.checkClipboardForSuggestion(readClipboardText())
@@ -275,7 +290,7 @@ fun KliprPocketScreen(
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Top Bar com Botão "Abrir Pasta" (>= 48dp)
+        // Top Bar com Botões "Temas & Motor" e "Abrir Pasta" (>= 48dp)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -286,7 +301,7 @@ fun KliprPocketScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = "⚡ KLIPR",
-                    fontSize = 24.sp,
+                    fontSize = 23.sp,
                     fontWeight = FontWeight.Black,
                     color = KliprPrimary,
                     letterSpacing = 1.sp
@@ -307,21 +322,121 @@ fun KliprPocketScreen(
                 }
             }
 
-            OutlinedButton(
-                onClick = onOpenDownloads,
-                modifier = Modifier.heightIn(min = 48.dp),
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, KliprBorder),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = KliprSecondary)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_folder),
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(text = "Abrir Pasta", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                OutlinedIconButton(
+                    onClick = { viewModel.setShowSettingsSheet(true) },
+                    modifier = Modifier.size(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, KliprBorder),
+                    colors = IconButtonDefaults.outlinedIconButtonColors(contentColor = KliprAccent)
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_settings),
+                        contentDescription = "Temas e Motores",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onOpenDownloads,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, KliprBorder),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = KliprSecondary)
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_folder),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(text = "Pasta", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+
+        // Banner de Auto-Atualização via GitHub Releases
+        AnimatedVisibility(visible = uiState.availableAppUpdate != null) {
+            val release = uiState.availableAppUpdate
+            if (release != null) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp, bottom = 4.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = KliprPrimary.copy(alpha = 0.16f),
+                    border = BorderStroke(1.dp, KliprPrimary.copy(alpha = 0.5f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "🚀 Nova versão ${release.tagName} disponível!",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = KliprTextPrimary
+                                )
+                                if (uiState.appUpdateStatus.isNotBlank()) {
+                                    Text(
+                                        text = uiState.appUpdateStatus,
+                                        fontSize = 11.sp,
+                                        color = KliprTextSecondary
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = { viewModel.dismissAppUpdateBanner() },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Clear,
+                                    contentDescription = "Fechar aviso",
+                                    tint = KliprTextSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+
+                        if (uiState.isDownloadingAppUpdate) {
+                            LinearProgressIndicator(
+                                progress = { uiState.appUpdateProgress / 100f },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp)),
+                                color = KliprPrimary,
+                                trackColor = KliprSurface
+                            )
+                        } else {
+                            Button(
+                                onClick = { viewModel.downloadAndInstallAppUpdate() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(44.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = KliprPrimary)
+                            ) {
+                                Text(
+                                    text = "Atualizar Agora (${release.tagName})",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -333,7 +448,7 @@ fun KliprPocketScreen(
                     .fillMaxWidth()
                     .padding(top = 6.dp, bottom = 4.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .clickable(enabled = !uiState.isInspecting && !dlState.isDownloading) {
+                    .clickable(enabled = !uiState.isInspecting) {
                         viewModel.acceptClipboardSuggestion()
                     },
                 shape = RoundedCornerShape(12.dp),
@@ -433,7 +548,7 @@ fun KliprPocketScreen(
                     viewModel.inspectUrl(uiState.urlText)
                 }
             },
-            enabled = !uiState.isInspecting && !dlState.isDownloading,
+            enabled = !uiState.isInspecting,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(50.dp),
@@ -493,7 +608,7 @@ fun KliprPocketScreen(
                         info = info,
                         isAudioMode = uiState.isAudioMode,
                         selectedFormat = uiState.selectedFormat,
-                        enabled = !dlState.isDownloading,
+                        enabled = true,
                         videoLabelForHeight = viewModel::videoLabelForHeight,
                         onModeChange = viewModel::selectMediaMode,
                         onSelectFormat = viewModel::selectFormat
@@ -501,15 +616,13 @@ fun KliprPocketScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // RECURSO DE CORTE DE TEMPO (Área >= 52dp + RangeSlider + Steppers + Capítulos)
+                    // RECURSO DE CORTE DE TEMPO
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 52.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .clickable(enabled = !dlState.isDownloading) {
-                                viewModel.toggleTrimming(!uiState.isTrimmingEnabled)
-                            },
+                            .clickable { viewModel.toggleTrimming(!uiState.isTrimmingEnabled) },
                         shape = RoundedCornerShape(12.dp),
                         color = KliprSurface,
                         border = BorderStroke(
@@ -575,7 +688,7 @@ fun KliprPocketScreen(
                             accurateCut = uiState.accurateCut,
                             isAudioMode = uiState.isAudioMode,
                             chapters = info.chapters,
-                            enabled = !dlState.isDownloading,
+                            enabled = true,
                             onRangeChange = viewModel::updateTrimRangeSeconds,
                             onNudgeStart = viewModel::nudgeTrimStart,
                             onNudgeEnd = viewModel::nudgeTrimEnd,
@@ -589,13 +702,13 @@ fun KliprPocketScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // SEÇÃO "SALVAR COMO" (Área >= 52dp + Quick-Folder Pills)
+                    // SEÇÃO "SALVAR COMO"
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 52.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .clickable(enabled = !dlState.isDownloading) { viewModel.toggleSaveAs() },
+                            .clickable { viewModel.toggleSaveAs() },
                         shape = RoundedCornerShape(12.dp),
                         color = KliprSurface,
                         border = BorderStroke(1.dp, KliprBorder)
@@ -716,50 +829,55 @@ fun KliprPocketScreen(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // Botão Principal de Download (56dp) ou Cancelar (50dp)
-                    if (!dlState.isDownloading) {
-                        Button(
-                            onClick = { triggerDownloadWithPermissionCheck() },
+                    // Botão Principal (suporta enfileirar se outro já estiver rodando!)
+                    Button(
+                        onClick = { triggerDownloadWithPermissionCheck() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                        contentPadding = PaddingValues()
+                    ) {
+                        Box(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .height(56.dp),
-                            shape = RoundedCornerShape(14.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-                            contentPadding = PaddingValues()
+                                .fillMaxSize()
+                                .background(
+                                    Brush.horizontalGradient(listOf(KliprPrimary, KliprSecondary)),
+                                    shape = RoundedCornerShape(14.dp)
+                                ),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(
-                                        Brush.horizontalGradient(listOf(KliprPrimary, KliprSecondary)),
-                                        shape = RoundedCornerShape(14.dp)
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.ic_download),
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = if (uiState.isTrimmingEnabled) "Baixar Trecho Cortado ✂️" else "Baixar Agora",
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White
-                                    )
-                                }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_download),
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = when {
+                                        dlState.isDownloading -> "Adicionar à Fila 📥"
+                                        uiState.isTrimmingEnabled -> "Baixar Trecho Cortado ✂️"
+                                        else -> "Baixar Agora"
+                                    },
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
                             }
                         }
-                    } else {
+                    }
+
+                    if (dlState.isDownloading) {
+                        Spacer(modifier = Modifier.height(8.dp))
                         OutlinedButton(
                             onClick = { viewModel.cancelDownload() },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(50.dp),
-                            shape = RoundedCornerShape(14.dp),
+                                .height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
                             border = BorderStroke(1.5.dp, KliprError),
                             colors = ButtonDefaults.outlinedButtonColors(
                                 containerColor = KliprError.copy(alpha = 0.12f),
@@ -773,8 +891,12 @@ fun KliprPocketScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Cancelar Download",
-                                fontSize = 15.sp,
+                                text = if (dlState.queuedCount > 0) {
+                                    "Cancelar Tudo (${dlState.queuedCount} na fila)"
+                                } else {
+                                    "Cancelar Download"
+                                },
+                                fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -797,7 +919,6 @@ fun KliprPocketScreen(
             )
         }
 
-        // Status ativo (do download em 2º plano ou da inspeção)
         val activeStatus = dlState.statusMessage.ifBlank { uiState.inspectStatusMessage }
         val activeError = if (dlState.statusMessage.isNotBlank()) dlState.isError else uiState.inspectIsError
         if (activeStatus.isNotBlank()) {
@@ -811,7 +932,7 @@ fun KliprPocketScreen(
             )
         }
 
-        // THUMB ZONE: Histórico de Downloads Recentes ou Guia Rápido (quando não há vídeo carregado)
+        // THUMB ZONE: Histórico de Downloads Recentes ou Guia Rápido
         if (uiState.videoInfo == null && !uiState.isInspecting) {
             Spacer(modifier = Modifier.height(18.dp))
             if (uiState.recentDownloads.isNotEmpty()) {
@@ -826,6 +947,20 @@ fun KliprPocketScreen(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+    }
+
+    if (uiState.showSettingsSheet) {
+        SettingsAndThemesSheet(
+            uiState = uiState,
+            onDismiss = { viewModel.setShowSettingsSheet(false) },
+            onSelectTheme = viewModel::selectTheme,
+            onToggleAria2c = viewModel::setAria2cEnabled,
+            onToggleSponsorBlock = viewModel::setSponsorBlockEnabled,
+            onToggleNightlyYtDlp = viewModel::setNightlyYtDlpEnabled,
+            onUpdateYtDlpNow = viewModel::updateYtDlpNow,
+            onCheckAppUpdateNow = { viewModel.checkAppUpdate(manual = true) },
+            onInstallAppUpdate = viewModel::downloadAndInstallAppUpdate
+        )
     }
 }
 
@@ -959,7 +1094,7 @@ private fun QuickShareOnboardingCard() {
             Text(
                 text = "1. Toque em Compartilhar no vídeo que está assistindo.\n" +
                     "2. Escolha \"Klipr Rápido ⚡\".\n" +
-                    "3. Um painel rápido sobe na hora para você escolher MP4 ou MP3 com 1 toque.",
+                    "3. Escolha MP4 ou MP3 em 1 toque — e se baixar vários seguidos, o Klipr coloca tudo na fila!",
                 fontSize = 12.sp,
                 color = KliprTextSecondary,
                 lineHeight = 18.sp

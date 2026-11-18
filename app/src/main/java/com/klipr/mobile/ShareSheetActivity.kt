@@ -82,7 +82,7 @@ class ShareSheetActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: Intent?) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         val newUrl = extractUrlFromIntent(intent)
@@ -484,7 +484,7 @@ private fun QuickShareBottomSheet(
 
                 if (dlState.isDownloading) {
                     Text(
-                        text = "⏳ Download em andamento: ${dlState.title} (${dlState.progress.toInt()}%). Iniciar este substituirá o atual.",
+                        text = "📥 Download ativo: ${dlState.title} (${dlState.progress.toInt()}%). Este vídeo entrará na fila.",
                         fontSize = 11.sp,
                         color = KliprSecondary
                     )
