@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Klipr</string>
+    <string name="share_activity_label">Klipr Rápido ⚡</string>
+    <string name="subtitle">Download Rápido &amp; Mídia</string>
+    <string name="paste_link_hint">Cole o link do vídeo aqui...</string>
+    <string name="btn_paste">Colar</string>
+    <string name="btn_inspect">Inspecionar</string>
+    <string name="btn_download">Baixar Agora</string>
+    <string name="downloading">Baixando mídia...</string>
+    <string name="download_completed">✅ Download concluído! Salvo na sua pasta de Downloads.</string>
+    <string name="format_max_video">🎬 Máxima (1080p+)</string>
+    <string name="format_fast_video">⚡ Rápido (720p)</string>
+    <string name="format_audio_mp3">🎵 Áudio (MP3)</string>
+</resources>
+

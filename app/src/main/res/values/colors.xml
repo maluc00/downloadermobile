@@ -1,0 +1,14 @@
+<resources>
+    <color name="klipr_bg">#0B0F19</color>
+    <color name="klipr_surface">#151D2A</color>
+    <color name="klipr_card">#1E293B</color>
+    <color name="klipr_primary">#6366F1</color>
+    <color name="klipr_secondary">#06B6D4</color>
+    <color name="klipr_accent">#818CF8</color>
+    <color name="klipr_text_primary">#F8FAFC</color>
+    <color name="klipr_text_secondary">#94A3B8</color>
+    <color name="klipr_border">#334155</color>
+    <color name="klipr_success">#10B981</color>
+    <color name="klipr_error">#EF4444</color>
+</resources>
+
